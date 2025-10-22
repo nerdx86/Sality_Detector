@@ -1,6 +1,125 @@
 use winreg::enums::*;
 use winreg::RegKey;
 use regex::Regex;
+use std::collections::HashSet;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref DICTIONARY: HashSet<&'static str> = {
+        let mut set = HashSet::new();
+        // Common English words and legitimate software vendors
+        let words = [
+            "microsoft", "windows", "google", "chrome", "mozilla", "firefox",
+            "adobe", "apple", "intel", "nvidia", "amd", "realtek", "dell",
+            "lenovo", "hp", "asus", "samsung", "sony", "lg", "toshiba",
+            "oracle", "java", "python", "node", "github", "docker", "steam",
+            "spotify", "slack", "zoom", "skype", "teams", "outlook", "office",
+            "visual", "studio", "code", "vmware", "virtualbox", "winrar",
+            "classes", "clients", "policies", "wow6432node", "installer",
+            "uninstall", "classes", "current", "version", "run", "services",
+            "application", "program", "system", "software", "hardware",
+            "network", "internet", "security", "antivirus", "firewall",
+            "backup", "update", "download", "install", "registry", "control",
+            "user", "admin", "local", "machine", "config", "settings",
+            "anthropic", "claude", "nvidia", "geforce", "experience",
+            "rockstar", "games", "epic", "valve", "origin", "uplay",
+            "discord", "telegram", "whatsapp", "signal", "dropbox", "onedrive",
+            "icloud", "creative", "cloud", "acrobat", "reader", "flash",
+            "shockwave", "quicktime", "winamp", "vlc", "media", "player",
+            "defender", "kaspersky", "avast", "avg", "malwarebytes", "norton",
+            "mcafee", "bitdefender", "eset", "sophos", "trend", "micro"
+        ];
+        for word in &words {
+            set.insert(*word);
+        }
+        set
+    };
+}
+
+fn calculate_entropy(s: &str) -> f32 {
+    if s.is_empty() {
+        return 0.0;
+    }
+
+    let mut char_counts: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+    let len = s.len() as f32;
+
+    for c in s.chars() {
+        *char_counts.entry(c.to_ascii_lowercase()).or_insert(0) += 1;
+    }
+
+    let mut entropy = 0.0;
+    for count in char_counts.values() {
+        let probability = *count as f32 / len;
+        entropy -= probability * probability.log2();
+    }
+
+    entropy
+}
+
+fn is_likely_random(key_name: &str) -> bool {
+    let lower = key_name.to_lowercase();
+
+    // Exact dictionary match
+    if DICTIONARY.contains(lower.as_str()) {
+        return false;
+    }
+
+    // Check if it's a combination of dictionary words (camelCase, etc.)
+    // Split by common patterns
+    let parts: Vec<&str> = lower.split(|c: char| !c.is_alphabetic()).collect();
+    let all_parts_valid = parts.iter()
+        .filter(|p| !p.is_empty())
+        .all(|p| p.len() < 4 || DICTIONARY.contains(p));
+
+    if all_parts_valid && !parts.is_empty() {
+        return false;
+    }
+
+    // Additional heuristics for random strings
+    let alpha_only: String = key_name.chars().filter(|c| c.is_alphabetic()).collect();
+
+    // Must have at least some alphabetic characters
+    if alpha_only.len() < 6 {
+        return false;
+    }
+
+    // Calculate Shannon entropy
+    let entropy = calculate_entropy(&alpha_only);
+
+    // High entropy indicates random/evenly distributed characters
+    // English text typically has entropy around 3.5-4.0
+    // Random strings have entropy around 4.5-5.0+ (for mixed case)
+    let high_entropy = entropy > 4.2;
+
+    // Check for suspicious patterns:
+    // 1. High consonant-to-vowel ratio (random strings often lack vowels)
+    let vowels = "aeiouAEIOU";
+    let vowel_count = alpha_only.chars().filter(|c| vowels.contains(*c)).count();
+    let consonant_count = alpha_only.len() - vowel_count;
+
+    // If more than 70% consonants in a 6+ char string, likely random
+    let high_consonant_ratio = alpha_only.len() >= 6
+        && (consonant_count as f32 / alpha_only.len() as f32) > 0.7;
+
+    // 2. No recognizable dictionary words as substrings (3+ chars)
+    let has_word_substring = DICTIONARY.iter().any(|word| {
+        word.len() >= 4 && lower.contains(word)
+    });
+
+    let no_dictionary_substrings = !has_word_substring && alpha_only.len() >= 8;
+
+    // Flag as suspicious if multiple indicators present
+    if high_entropy && (high_consonant_ratio || no_dictionary_substrings) {
+        return true;
+    }
+
+    if high_consonant_ratio && no_dictionary_substrings {
+        return true;
+    }
+
+    false
+}
 
 fn main() {
     println!("Sality Malware Detector");
@@ -64,17 +183,25 @@ fn check_random_software_keys() {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     match hkcu.open_subkey("Software") {
         Ok(software_key) => {
-            // Pattern: random characters with random numbers subkey
-            let key_pattern = Regex::new(r"^[a-zA-Z]{8,}$").unwrap();
+            let number_pattern = Regex::new(r"^\d+$").unwrap();
+            let mut found_suspicious = false;
 
             for key_name in software_key.enum_keys().filter_map(|x| x.ok()) {
-                if key_pattern.is_match(&key_name) {
-                    // Check if it has numeric subkeys
+                // Use dictionary-based detection
+                if is_likely_random(&key_name) {
+                    // Check if it has numeric subkeys (common Sality pattern)
                     if let Ok(subkey) = software_key.open_subkey(&key_name) {
-                        let number_pattern = Regex::new(r"^\d+$").unwrap();
                         for subkey_name in subkey.enum_keys().filter_map(|x| x.ok()) {
                             if number_pattern.is_match(&subkey_name) {
-                                println!("[HKCU\\Software\\{}\\{}]", key_name, subkey_name);
+                                found_suspicious = true;
+                                let alpha_only: String = key_name.chars()
+                                    .filter(|c| c.is_alphabetic())
+                                    .collect();
+                                let entropy = calculate_entropy(&alpha_only);
+
+                                println!("[SUSPICIOUS] [HKCU\\Software\\{}\\{}]", key_name, subkey_name);
+                                println!("  Reason: Random-looking key name with numeric subkey");
+                                println!("  Entropy: {:.2} (normal English: 3.5-4.0, random: 4.2+)", entropy);
                                 let path = format!("Software\\{}\\{}", key_name, subkey_name);
                                 display_all_values(&hkcu, &path);
                                 println!();
@@ -82,6 +209,10 @@ fn check_random_software_keys() {
                         }
                     }
                 }
+            }
+
+            if !found_suspicious {
+                println!("  No suspicious random keys detected.\n");
             }
         }
         Err(e) => {

@@ -6,3 +6,10 @@ edition = "2024"
 [dependencies]
 winreg = "0.52"
 regex = "1.10"
+lazy_static = "1.4"
+
+[profile.release]
+strip = true       # Remove debug symbols
+opt-level = "z"    # Optimize for size
+lto = true         # Link-time optimization
+codegen-units = 1  # Better optimization
