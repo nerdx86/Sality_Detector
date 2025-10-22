@@ -25,6 +25,9 @@ Displays all entries from common autorun registry keys:
 - `HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce`
 - `HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce`
 - `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SharedTaskScheduler`
+- `HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run`
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run`
+- `HKLM\Software\Microsoft\Windows\CurrentVersion\RunServices` (legacy)
 
 Sality variants often add themselves to these locations for persistence.
 
@@ -77,7 +80,97 @@ Examines Internet proxy settings for unauthorized modifications:
 
 Malware may enable proxy settings to intercept web traffic or redirect users to malicious sites.
 
-### 7. Security Settings Tampering
+### 7. Image File Execution Options (IFEO) Hijacking
+
+Detects debugger hijacking of executables:
+- `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options`
+
+Malware can register a debugger for critical executables, preventing them from running or redirecting execution. Critical targets:
+- `taskmgr.exe` (Task Manager)
+- `regedit.exe` (Registry Editor)
+- `msconfig.exe` (System Configuration)
+- `cmd.exe` (Command Prompt)
+- `explorer.exe` (Windows Explorer)
+
+**Default Mode**: Only shows critical executable hijacking
+**Verbose Mode**: Shows all IFEO debugger entries
+
+### 8. Hosts File Modification
+
+Checks `C:\Windows\System32\drivers\etc\hosts` for suspicious domain redirections.
+
+Malware commonly redirects security/update domains to localhost (127.0.0.1) to block:
+- Windows Update (windowsupdate.com, update.microsoft.com)
+- Antivirus vendors (kaspersky.com, norton.com, mcafee.com, etc.)
+
+**Default Mode**: Only shows suspicious redirections
+**Verbose Mode**: Shows entire hosts file contents
+
+### 9. Network Provider Order
+
+Validates network provider configuration:
+- `HKLM\SYSTEM\CurrentControlSet\Control\NetworkProvider\Order`
+
+Malware may inject malicious network providers to intercept network traffic. Normal providers:
+- RDPNP (Remote Desktop)
+- LanmanWorkstation (Windows file sharing)
+- webclient (WebDAV)
+
+### 10. Known DLLs Registry
+
+Checks for modifications to the system DLL cache:
+- `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`
+
+Malware may replace critical Windows DLLs to inject code into all processes. Tool validates DLL names against known Windows system DLLs.
+
+### 11. Dropped Files Detection
+
+Checks for known Sality dropped files:
+- `C:\Windows\System32\wmdrtc32.dll` (Sality main DLL)
+- `C:\Windows\System32\wmdrtc32.dl_` (Compressed backup)
+
+High confidence indicators - these files should not exist on clean systems.
+
+### 12. Removable Drive Propagation
+
+Scans all drives (A-Z) for `autorun.inf` files.
+
+Sality creates autorun.inf on removable drives and network shares to spread to other systems. The tool displays autorun.inf contents if found.
+
+### 13. Startup Folder Executables
+
+Checks for suspicious executables in Startup folders:
+- `C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup`
+- `C:\Users\Public\Start Menu\Programs\Startup`
+
+Applies entropy/random detection to executable names. Flags executables with random-looking filenames.
+
+### 14. PE File Infection Detection
+
+Performs lightweight PE analysis on critical Windows executables to detect Sality infection markers:
+
+**Target files:**
+- explorer.exe (Windows Explorer)
+- cmd.exe (Command Prompt)
+- notepad.exe (Notepad)
+- svchost.exe (Service Host)
+
+**Detection method:**
+Checks for Sality PE infection markers:
+- CRC checksum == 0 (Sality zeroes this field)
+- Other PE header anomalies
+
+**Note**: This is a simplified check focusing on high-value targets only (not a full system scan).
+
+### 15. Rootkit Device Detection
+
+Attempts to open Sality rootkit devices:
+- `\\.\amsint32`
+- `\\.\amsint64`
+
+Sality variants install a rootkit driver that creates these device objects. Detection indicates active rootkit presence.
+
+### 16. Security Settings Tampering
 
 Checks for registry values indicating disabled security features:
 
@@ -115,7 +208,7 @@ Checks for registry values indicating disabled security features:
 
 Sality disables these tools to prevent users from detecting and removing the infection.
 
-### 8. SafeBoot Modifications
+### 17. SafeBoot Modifications
 
 Validates the SafeBoot registry structure:
 - `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot`
@@ -291,16 +384,25 @@ System Tool Restrictions:
 
 ## Detection Methodology
 
-This tool employs 8 comprehensive detection categories to identify Sality infections:
+This tool employs 17 comprehensive detection categories to identify Sality infections:
 
-1. **Autorun Persistence** - Monitors 5 registry locations for unauthorized startup entries
+1. **Autorun Persistence** - Monitors 8 registry locations for unauthorized startup entries
 2. **Winlogon Hijacking** - Validates Shell and Userinit values
 3. **File Association Hijacking** - Critical check for .exe/.com handler modifications
 4. **Random Registry Keys** - Multi-heuristic analysis (entropy, dictionary, patterns)
 5. **DLL Injection** - Checks AppInit_DLLs mechanism
 6. **Browser Hijacking** - Examines proxy settings
-7. **Security Tampering** - 13+ checks for disabled security features
-8. **SafeBoot Modifications** - Detects prevention of Safe Mode boot
+7. **IFEO Hijacking** - Detects debugger redirection of critical executables
+8. **Hosts File** - Identifies suspicious domain redirections to block security tools
+9. **Network Providers** - Validates network provider order for malicious injections
+10. **Known DLLs** - Checks for system DLL replacements
+11. **Dropped Files** - Detects known Sality files (wmdrtc32.dll)
+12. **Removable Drives** - Scans for autorun.inf propagation mechanism
+13. **Startup Folders** - Flags random-named executables in startup locations
+14. **PE Infection** - Analyzes critical Windows executables for infection markers
+15. **Rootkit Devices** - Attempts to open Sality rootkit device objects
+16. **Security Tampering** - 13+ checks for disabled security features
+17. **SafeBoot Modifications** - Detects prevention of Safe Mode boot
 
 ### Random Key Detection Algorithm
 

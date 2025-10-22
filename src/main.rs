@@ -280,6 +280,420 @@ fn check_browser_hijacking() {
     println!();
 }
 
+fn check_ifeo_hijacking(verbose: bool) {
+    println!("[*] Checking Image File Execution Options:");
+    println!("===========================================\n");
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let path = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options";
+
+    let critical_exes = [
+        "explorer.exe", "taskmgr.exe", "regedit.exe",
+        "msconfig.exe", "cmd.exe", "iexplore.exe",
+        "chrome.exe", "firefox.exe"
+    ];
+
+    match hklm.open_subkey(path) {
+        Ok(ifeo_key) => {
+            let mut found_any = false;
+
+            for exe_name in ifeo_key.enum_keys().filter_map(|x| x.ok()) {
+                let subkey_path = format!("{}\\{}", path, exe_name);
+                if let Ok(exe_key) = hklm.open_subkey(&subkey_path) {
+                    if let Ok(debugger) = exe_key.get_value::<String, _>("Debugger") {
+                        found_any = true;
+                        let is_critical = critical_exes.iter()
+                            .any(|&crit| exe_name.eq_ignore_ascii_case(crit));
+
+                        if is_critical {
+                            println!("  [CRITICAL] {} has debugger hijacking:", exe_name);
+                        } else if verbose {
+                            println!("  [SUSPICIOUS] {} has debugger:", exe_name);
+                        } else {
+                            continue;
+                        }
+
+                        println!("    Debugger = {}", debugger);
+                    }
+                }
+            }
+
+            if !found_any {
+                println!("  No IFEO debugger hijacking detected.");
+            }
+        }
+        Err(e) => {
+            println!("  Error accessing IFEO registry: {}", e);
+        }
+    }
+
+    println!();
+}
+
+fn check_hosts_file(verbose: bool) {
+    println!("[*] Checking Hosts File:");
+    println!("========================\n");
+
+    use std::fs;
+    let hosts_path = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+
+    let suspicious_domains = [
+        "microsoft.com", "windowsupdate.com", "update.microsoft.com",
+        "kaspersky.com", "avg.com", "avast.com", "norton.com",
+        "mcafee.com", "eset.com", "sophos.com", "malwarebytes.com",
+        "symantec.com", "trendmicro.com", "bitdefender.com"
+    ];
+
+    match fs::read_to_string(hosts_path) {
+        Ok(content) => {
+            let mut found_suspicious = false;
+
+            for line in content.lines() {
+                let trimmed = line.trim();
+
+                if trimmed.starts_with('#') || trimmed.is_empty() {
+                    if verbose {
+                        println!("  {}", line);
+                    }
+                    continue;
+                }
+
+                for domain in &suspicious_domains {
+                    if trimmed.contains(domain) {
+                        if !found_suspicious {
+                            println!("  [SUSPICIOUS] Hosts file contains redirections:");
+                            found_suspicious = true;
+                        }
+                        println!("    {}", line);
+                        break;
+                    }
+                }
+
+                if verbose && !found_suspicious {
+                    println!("  {}", line);
+                }
+            }
+
+            if !found_suspicious {
+                println!("  No suspicious entries found.");
+            }
+        }
+        Err(e) => {
+            println!("  Error reading hosts file: {}", e);
+        }
+    }
+
+    println!();
+}
+
+fn check_network_providers() {
+    println!("[*] Checking Network Provider Order:");
+    println!("====================================\n");
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let path = "SYSTEM\\CurrentControlSet\\Control\\NetworkProvider\\Order";
+
+    match hklm.open_subkey(path) {
+        Ok(key) => {
+            match key.get_value::<String, _>("ProviderOrder") {
+                Ok(order) => {
+                    println!("  ProviderOrder: {}", order);
+
+                    let normal_providers = ["RDPNP", "LanmanWorkstation", "webclient"];
+                    let providers: Vec<&str> = order.split(',').map(|p| p.trim()).collect();
+
+                    for provider in providers {
+                        if !provider.is_empty() && !normal_providers.contains(&provider) {
+                            println!("  [SUSPICIOUS] Unknown provider: {}", provider);
+                        }
+                    }
+                }
+                Err(_) => {
+                    println!("  ProviderOrder value not found.");
+                }
+            }
+        }
+        Err(e) => {
+            println!("  Error accessing Network Provider registry: {}", e);
+        }
+    }
+
+    println!();
+}
+
+fn check_known_dlls() {
+    println!("[*] Checking Known DLLs Registry:");
+    println!("==================================\n");
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let path = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\KnownDLLs";
+
+    match hklm.open_subkey(path) {
+        Ok(key) => {
+            let mut suspicious = false;
+
+            // Known legitimate Windows DLL prefixes
+            let legitimate_patterns = [
+                "advapi32", "clbcatq", "comctl32", "comdlg32", "gdi32", "gdiplus",
+                "imagehlp", "kernel32", "msvcrt", "normaliz", "nsi", "ole32",
+                "oleaut32", "psapi", "rpcrt4", "sechost", "setupapi", "shell32",
+                "shlwapi", "user32", "wldap32", "ws2_32", "difxapi", "msctf",
+                "wow", "lpk"
+            ];
+
+            for (name, value) in key.enum_values().filter_map(|x| x.ok()) {
+                let value_str = format!("{:?}", value);
+
+                if let Some(dll_name) = value_str.split('\\').last() {
+                    let dll_clean = dll_name.trim_end_matches(')').trim_end_matches('"');
+                    let dll_lower = dll_clean.to_lowercase();
+                    let dll_base = dll_lower.trim_end_matches(".dll");
+
+                    // Check if it's a known legitimate DLL
+                    let is_legitimate = legitimate_patterns.iter()
+                        .any(|pattern| dll_base.starts_with(pattern) || dll_base.contains(pattern));
+
+                    if !is_legitimate && is_likely_random(dll_base) {
+                        suspicious = true;
+                        println!("  [SUSPICIOUS] {} = {:?}", name, value);
+                    }
+                }
+            }
+
+            if !suspicious {
+                println!("  No suspicious modifications detected.");
+            }
+        }
+        Err(e) => {
+            println!("  Error accessing Known DLLs registry: {}", e);
+        }
+    }
+
+    println!();
+}
+
+fn check_dropped_files() {
+    println!("[*] Checking for Dropped Files:");
+    println!("================================\n");
+
+    use std::path::Path;
+
+    let sality_files = [
+        ("C:\\Windows\\System32\\wmdrtc32.dll", "Known Sality DLL"),
+        ("C:\\Windows\\System32\\wmdrtc32.dl_", "Known Sality compressed file"),
+    ];
+
+    let mut found_any = false;
+
+    for (file_path, description) in &sality_files {
+        if Path::new(file_path).exists() {
+            found_any = true;
+            println!("  [CRITICAL] {} found!", description);
+            println!("    Path: {}", file_path);
+        }
+    }
+
+    if !found_any {
+        println!("  No known Sality dropped files found.");
+    }
+
+    println!();
+}
+
+fn check_removable_drives() {
+    println!("[*] Checking Removable Drives:");
+    println!("===============================\n");
+
+    use std::fs;
+
+    let mut found_any = false;
+
+    for letter in 'A'..='Z' {
+        let drive = format!("{}:\\", letter);
+        let autorun_path = format!("{}autorun.inf", drive);
+
+        if let Ok(metadata) = fs::metadata(&autorun_path) {
+            if metadata.is_file() {
+                found_any = true;
+                println!("  [SUSPICIOUS] autorun.inf found on drive {}:", letter);
+
+                match fs::read_to_string(&autorun_path) {
+                    Ok(content) => {
+                        for line in content.lines().take(10) {
+                            println!("    {}", line);
+                        }
+                    }
+                    Err(e) => {
+                        println!("    Error reading file: {}", e);
+                    }
+                }
+                println!();
+            }
+        }
+    }
+
+    if !found_any {
+        println!("  No autorun.inf files found on removable drives.");
+    }
+
+    println!();
+}
+
+fn check_startup_folder() {
+    println!("[*] Checking Startup Folder:");
+    println!("============================\n");
+
+    use std::fs;
+
+    let startup_paths = [
+        "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+        "C:\\Users\\Public\\Start Menu\\Programs\\Startup",
+    ];
+
+    let mut found_suspicious = false;
+
+    for startup_path in &startup_paths {
+        if let Ok(entries) = fs::read_dir(startup_path) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "exe" || ext == "scr" || ext == "bat" {
+                        if let Some(filename) = path.file_stem() {
+                            let name = filename.to_string_lossy();
+
+                            if is_likely_random(&name) {
+                                found_suspicious = true;
+                                println!("  [SUSPICIOUS] Random-looking executable in Startup:");
+                                println!("    {}", path.display());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !found_suspicious {
+        println!("  No suspicious files in Startup folders.");
+    }
+
+    println!();
+}
+
+fn check_pe_infection() {
+    println!("[*] Checking PE File Infection Markers:");
+    println!("========================================\n");
+
+    use std::fs::File;
+
+    let critical_files = [
+        ("C:\\Windows\\System32\\explorer.exe", "Windows Explorer"),
+        ("C:\\Windows\\System32\\cmd.exe", "Command Prompt"),
+        ("C:\\Windows\\System32\\notepad.exe", "Notepad"),
+        ("C:\\Windows\\System32\\svchost.exe", "Service Host"),
+    ];
+
+    for (file_path, description) in &critical_files {
+        match File::open(file_path) {
+            Ok(mut file) => {
+                if let Ok(infected) = check_sality_pe_markers(&mut file) {
+                    if infected {
+                        println!("  [INFECTED] {} appears infected!", description);
+                        println!("    Path: {}", file_path);
+                        println!("    Reason: Sality infection markers detected");
+                    }
+                }
+            }
+            Err(_) => {
+                // File not accessible, skip
+            }
+        }
+    }
+
+    println!("  PE infection check complete.\n");
+}
+
+fn check_sality_pe_markers(file: &mut std::fs::File) -> Result<bool, std::io::Error> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut buffer = vec![0u8; 1024];
+
+    // Read DOS header
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut buffer[0..64])?;
+
+    // Check DOS signature
+    if buffer[0] != 0x4D || buffer[1] != 0x5A {
+        return Ok(false); // Not a valid PE file
+    }
+
+    // Get PE header offset from offset 0x3C
+    let pe_offset = u32::from_le_bytes([buffer[0x3C], buffer[0x3C + 1], buffer[0x3C + 2], buffer[0x3C + 3]]) as u64;
+
+    // Read PE header
+    file.seek(SeekFrom::Start(pe_offset))?;
+    file.read_exact(&mut buffer[0..256])?;
+
+    // Check PE signature
+    if buffer[0] != 0x50 || buffer[1] != 0x45 {
+        return Ok(false);
+    }
+
+    // Check CRC checksum at offset 0x58 from PE header start
+    // Sality zeroes this out
+    let crc_offset = 0x58;
+    let crc = u32::from_le_bytes([
+        buffer[crc_offset],
+        buffer[crc_offset + 1],
+        buffer[crc_offset + 2],
+        buffer[crc_offset + 3]
+    ]);
+
+    // Note: Zero CRC alone is not definitive, but it's a marker
+    // Combined with other checks would be more accurate
+    if crc == 0 {
+        // Additional check: section headers
+        // This is a simplified check - full validation would require more parsing
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn check_rootkit_device() {
+    println!("[*] Checking for Rootkit Devices:");
+    println!("==================================\n");
+
+    use std::fs::OpenOptions;
+
+    let device_names = [
+        "\\\\.\\amsint32",
+        "\\\\.\\amsint64",
+    ];
+
+    let mut found_any = false;
+
+    for device_name in &device_names {
+        // Try to open the device
+        match OpenOptions::new().read(true).open(device_name) {
+            Ok(_) => {
+                found_any = true;
+                println!("  [CRITICAL] Sality rootkit device found!");
+                println!("    Device: {}", device_name);
+            }
+            Err(_) => {
+                // Device doesn't exist (good)
+            }
+        }
+    }
+
+    if !found_any {
+        println!("  No rootkit devices detected.");
+    }
+
+    println!();
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
@@ -309,6 +723,33 @@ fn main() {
 
     // Check browser hijacking
     check_browser_hijacking();
+
+    // Check IFEO debugger hijacking
+    check_ifeo_hijacking(verbose);
+
+    // Check hosts file
+    check_hosts_file(verbose);
+
+    // Check network providers
+    check_network_providers();
+
+    // Check known DLLs
+    check_known_dlls();
+
+    // Check for dropped files
+    check_dropped_files();
+
+    // Check removable drives
+    check_removable_drives();
+
+    // Check startup folder
+    check_startup_folder();
+
+    // Check PE infection
+    check_pe_infection();
+
+    // Check rootkit devices
+    check_rootkit_device();
 
     // Check security center tampering
     check_security_tampering();
@@ -349,6 +790,21 @@ fn display_autorun_keys() {
     // SharedTaskScheduler
     println!("[HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SharedTaskScheduler]");
     display_all_values(&hklm, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SharedTaskScheduler");
+    println!();
+
+    // Policies Run (HKLM)
+    println!("[HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\Run]");
+    display_all_values(&hklm, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\Run");
+    println!();
+
+    // Policies Run (HKCU)
+    println!("[HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\Run]");
+    display_all_values(&hkcu, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\Run");
+    println!();
+
+    // RunServices (legacy)
+    println!("[HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServices]");
+    display_all_values(&hklm, "Software\\Microsoft\\Windows\\CurrentVersion\\RunServices");
     println!();
 }
 
