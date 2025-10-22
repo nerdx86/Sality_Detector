@@ -6,10 +6,14 @@ A Rust-based Windows registry scanner designed to detect indicators of Sality ma
 
 Sality is a polymorphic file infector and botnet malware family that has been active since 2003. It spreads by infecting executable files and uses various techniques to maintain persistence and evade detection, including:
 
+- Hijacking file associations (.exe, .com) to intercept all program executions
+- Modifying Winlogon to execute at system startup
 - Creating registry entries with randomized names
 - Disabling Windows security features (UAC, Windows Defender, Firewall)
+- Disabling Task Manager and Registry Editor to prevent removal
 - Deleting SafeBoot registry keys to prevent Safe Mode boot
 - Hiding files by modifying Explorer settings
+- Using DLL injection via AppInit_DLLs
 
 ## What This Tool Detects
 
@@ -18,10 +22,32 @@ Sality is a polymorphic file infector and botnet malware family that has been ac
 Displays all entries from common autorun registry keys:
 - `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 - `HKLM\Software\Microsoft\Windows\CurrentVersion\Run`
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce`
+- `HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce`
+- `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SharedTaskScheduler`
 
 Sality variants often add themselves to these locations for persistence.
 
-### 2. Suspicious Random Registry Keys
+### 2. Winlogon Hijacking
+
+Checks critical Winlogon registry values for modifications:
+- `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon`
+  - **Shell**: Should be "explorer.exe" (launches Windows Explorer)
+  - **Userinit**: Should be "C:\Windows\system32\userinit.exe," (user initialization)
+
+Sality may modify these to execute malicious code at every user login. Multiple executables in Userinit or unexpected Shell values indicate infection.
+
+### 3. File Association Hijacking (CRITICAL)
+
+Examines file association handlers for executable files:
+- `SOFTWARE\Classes\exefile\shell\open\command` (both HKLM and HKCU)
+- `SOFTWARE\Classes\comfile\shell\open\command` (both HKLM and HKCU)
+
+This is Sality's primary infection vector. The malware modifies how .exe and .com files are launched, injecting itself before the legitimate program runs. Normal value should be `"%1" %*`. Suspicious indicators:
+- Multiple .exe references in the command
+- Unexpected executable paths before the `%1` parameter
+
+### 4. Suspicious Random Registry Keys
 
 Scans for registry keys matching Sality's pattern: `HKCU\Software\{RandomChars}\{RandomNumbers}`
 
@@ -33,7 +59,25 @@ Detection uses multiple heuristics:
 - **Consonant-to-Vowel Ratio**: Random generators often produce consonant-heavy strings (>70%)
 - **Numeric Subkeys**: Common Sality pattern uses all-numeric subkey names
 
-### 3. Security Settings Tampering
+### 5. DLL Injection Points
+
+Checks for malicious DLL injection mechanisms:
+- `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows`
+  - **AppInit_DLLs**: Lists DLLs loaded into every process
+  - **LoadAppInit_DLLs**: Must be 1 for AppInit_DLLs to take effect
+
+Sality may use this mechanism to inject malicious code into all running processes. Any non-empty AppInit_DLLs value warrants investigation.
+
+### 6. Browser Hijacking
+
+Examines Internet proxy settings for unauthorized modifications:
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+  - **ProxyEnable**: Should be 0 unless user configured a proxy
+  - **ProxyServer**: Proxy server address if enabled
+
+Malware may enable proxy settings to intercept web traffic or redirect users to malicious sites.
+
+### 7. Security Settings Tampering
 
 Checks for registry values indicating disabled security features:
 
@@ -64,7 +108,14 @@ Checks for registry values indicating disabled security features:
   - `Hidden = 2` (Don't show hidden files)
   - `ShowSuperHidden = 0` (Hide protected OS files)
 
-### 4. SafeBoot Modifications
+**System Tool Restrictions:**
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System` (both HKCU and HKLM)
+  - `DisableTaskMgr = 1` (Task Manager disabled)
+  - `DisableRegistryTools = 1` (Registry Editor disabled)
+
+Sality disables these tools to prevent users from detecting and removing the infection.
+
+### 8. SafeBoot Modifications
 
 Enumerates and displays the complete SafeBoot registry structure:
 - `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot`
@@ -100,10 +151,30 @@ target\release\sality_detector.exe
 #### Clean System
 
 ```
+[*] Checking Winlogon Hijacking:
+=================================
+
+  Shell = explorer.exe (OK)
+  Userinit = C:\Windows\system32\userinit.exe, (OK)
+
+[*] Checking File Association Hijacking:
+=========================================
+
+Executable File Associations:
+  [SOFTWARE\Classes\exefile\shell\open\command]: "%1" %*
+  [SOFTWARE\Classes\comfile\shell\open\command]: "%1" %*
+
 [*] Checking for Suspicious Random Keys:
 =========================================
 
   No suspicious random keys detected.
+
+[*] Checking DLL Injection Points:
+===================================
+
+AppInit_DLLs Mechanism:
+  AppInit_DLLs = (empty)
+  LoadAppInit_DLLs = 0 (disabled)
 
 [*] Checking Security Settings Tampering:
 ==========================================
@@ -112,14 +183,26 @@ Security Center Settings:
 
 System Policy Settings:
 
-Firewall Settings:
-
-Explorer Settings (Hidden Files):
+System Tool Restrictions:
 ```
 
 #### Infected System
 
 ```
+[*] Checking Winlogon Hijacking:
+=================================
+
+  [SUSPICIOUS] Userinit = C:\Windows\system32\userinit.exe,C:\malware\evil.exe
+    Reason: Multiple executables detected
+
+[*] Checking File Association Hijacking:
+=========================================
+
+Executable File Associations:
+  [SUSPICIOUS] [SOFTWARE\Classes\exefile\shell\open\command]
+    Value: C:\malware\sality.exe "%1" %*
+    Reason: Multiple executables or unexpected pattern
+
 [*] Checking for Suspicious Random Keys:
 =========================================
 
@@ -127,6 +210,13 @@ Explorer Settings (Hidden Files):
   Reason: Random-looking key name with numeric subkey
   Entropy: 4.58 (normal English: 3.5-4.0, random: 4.2+)
   value1 = RegValue(REG_SZ: C:\Users\...\malware.exe)
+
+[*] Checking DLL Injection Points:
+===================================
+
+AppInit_DLLs Mechanism:
+  [FOUND] AppInit_DLLs = C:\malware\inject.dll
+  [ENABLED] LoadAppInit_DLLs = 1
 
 [*] Checking Security Settings Tampering:
 ==========================================
@@ -138,11 +228,23 @@ Security Center Settings:
 System Policy Settings:
   [HIT] [SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System]\EnableLUA = 0
 
-Explorer Settings (Hidden Files):
-  [HIT] [Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced]\ShowSuperHidden = 0
+System Tool Restrictions:
+  [HIT] [Software\Microsoft\Windows\CurrentVersion\Policies\System]\DisableTaskMgr = 1
+  [HIT] [Software\Microsoft\Windows\CurrentVersion\Policies\System]\DisableRegistryTools = 1
 ```
 
 ## Detection Methodology
+
+This tool employs 8 comprehensive detection categories to identify Sality infections:
+
+1. **Autorun Persistence** - Monitors 5 registry locations for unauthorized startup entries
+2. **Winlogon Hijacking** - Validates Shell and Userinit values
+3. **File Association Hijacking** - Critical check for .exe/.com handler modifications
+4. **Random Registry Keys** - Multi-heuristic analysis (entropy, dictionary, patterns)
+5. **DLL Injection** - Checks AppInit_DLLs mechanism
+6. **Browser Hijacking** - Examines proxy settings
+7. **Security Tampering** - 13+ checks for disabled security features
+8. **SafeBoot Modifications** - Detects prevention of Safe Mode boot
 
 ### Random Key Detection Algorithm
 

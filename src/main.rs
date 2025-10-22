@@ -121,6 +121,164 @@ fn is_likely_random(key_name: &str) -> bool {
     false
 }
 
+fn check_file_associations() {
+    println!("[*] Checking File Association Hijacking:");
+    println!("=========================================\n");
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+    println!("Executable File Associations:");
+    check_command_value(&hklm, "SOFTWARE\\Classes\\exefile\\shell\\open\\command", "");
+    check_command_value(&hkcu, "SOFTWARE\\Classes\\exefile\\shell\\open\\command", "");
+    check_command_value(&hklm, "SOFTWARE\\Classes\\comfile\\shell\\open\\command", "");
+    check_command_value(&hkcu, "SOFTWARE\\Classes\\comfile\\shell\\open\\command", "");
+
+    println!();
+}
+
+fn check_command_value(hive: &RegKey, path: &str, value_name: &str) {
+    match hive.open_subkey(path) {
+        Ok(key) => {
+            match key.get_value::<String, _>(value_name) {
+                Ok(value) => {
+                    let lower = value.to_lowercase();
+                    // Normal: '"%1" %*' or similar
+                    // Suspicious: Multiple .exe references or unexpected patterns
+                    let exe_count = lower.matches(".exe").count();
+                    let has_suspicious_pattern = (lower.contains("%1") && !value.starts_with("\"")) ||
+                                                 lower.split_whitespace()
+                                                      .filter(|s| s.ends_with(".exe\"") || s.ends_with(".exe"))
+                                                      .count() > 1;
+
+                    if exe_count > 1 || has_suspicious_pattern {
+                        println!("  [SUSPICIOUS] [{}]", path);
+                        println!("    Value: {}", value);
+                        println!("    Reason: Multiple executables or unexpected pattern");
+                    } else {
+                        println!("  [{}]: {}", path, value);
+                    }
+                }
+                Err(_) => {
+                    println!("  [{}]: (not set)", path);
+                }
+            }
+        }
+        Err(_) => {
+            println!("  [{}]: (key not found)", path);
+        }
+    }
+}
+
+fn check_winlogon() {
+    println!("[*] Checking Winlogon Hijacking:");
+    println!("=================================\n");
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let path = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon";
+
+    match hklm.open_subkey(path) {
+        Ok(key) => {
+            // Shell should be "explorer.exe"
+            if let Ok(shell) = key.get_value::<String, _>("Shell") {
+                let normalized = shell.trim().to_lowercase();
+                if normalized.is_empty() || normalized == "explorer.exe" {
+                    println!("  Shell = {} (OK)", shell);
+                } else {
+                    println!("  [SUSPICIOUS] Shell = {}", shell);
+                    println!("    Expected: explorer.exe");
+                }
+            } else {
+                println!("  Shell = (not set - OK)");
+            }
+
+            // Userinit should be "C:\\Windows\\system32\\userinit.exe,"
+            if let Ok(userinit) = key.get_value::<String, _>("Userinit") {
+                let normalized = userinit.to_lowercase().replace("\\\\", "\\");
+                let exe_count = normalized.matches(".exe").count();
+
+                if normalized.contains("system32\\userinit.exe") && exe_count == 1 {
+                    println!("  Userinit = {} (OK)", userinit);
+                } else if exe_count > 1 {
+                    println!("  [SUSPICIOUS] Userinit = {}", userinit);
+                    println!("    Reason: Multiple executables detected");
+                } else if !normalized.contains("system32\\userinit.exe") {
+                    println!("  [SUSPICIOUS] Userinit = {}", userinit);
+                    println!("    Expected: C:\\Windows\\system32\\userinit.exe,");
+                }
+            } else {
+                println!("  Userinit = (not set)");
+            }
+        }
+        Err(e) => println!("  Error accessing Winlogon: {}", e),
+    }
+
+    println!();
+}
+
+fn check_dll_injection() {
+    println!("[*] Checking DLL Injection Points:");
+    println!("===================================\n");
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let path = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows";
+
+    println!("AppInit_DLLs Mechanism:");
+    match hklm.open_subkey(path) {
+        Ok(key) => {
+            if let Ok(dlls) = key.get_value::<String, _>("AppInit_DLLs") {
+                if !dlls.trim().is_empty() {
+                    println!("  [FOUND] AppInit_DLLs = {}", dlls);
+                } else {
+                    println!("  AppInit_DLLs = (empty)");
+                }
+            } else {
+                println!("  AppInit_DLLs = (not set)");
+            }
+
+            if let Ok(load) = key.get_value::<u32, _>("LoadAppInit_DLLs") {
+                if load == 1 {
+                    println!("  [ENABLED] LoadAppInit_DLLs = 1");
+                } else {
+                    println!("  LoadAppInit_DLLs = 0 (disabled)");
+                }
+            }
+        }
+        Err(e) => println!("  Error accessing Windows key: {}", e),
+    }
+
+    println!();
+}
+
+fn check_browser_hijacking() {
+    println!("[*] Checking Browser Hijacking:");
+    println!("================================\n");
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let path = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+
+    println!("Internet Proxy Settings:");
+    match hkcu.open_subkey(path) {
+        Ok(key) => {
+            if let Ok(enabled) = key.get_value::<u32, _>("ProxyEnable") {
+                if enabled == 1 {
+                    println!("  [FOUND] ProxyEnable = 1");
+                    if let Ok(server) = key.get_value::<String, _>("ProxyServer") {
+                        println!("  [FOUND] ProxyServer = {}", server);
+                    }
+                } else {
+                    println!("  ProxyEnable = 0 (disabled)");
+                }
+            } else {
+                println!("  ProxyEnable = (not set)");
+            }
+        }
+        Err(e) => println!("  Error accessing Internet Settings: {}", e),
+    }
+
+    println!();
+}
+
 fn main() {
     println!("Sality Malware Detector");
     println!("======================\n");
@@ -128,8 +286,20 @@ fn main() {
     // Display autorun locations
     display_autorun_keys();
 
+    // Check Winlogon hijacking
+    check_winlogon();
+
+    // Check file association hijacking
+    check_file_associations();
+
     // Check for random subkeys under HKCU\Software
     check_random_software_keys();
+
+    // Check DLL injection points
+    check_dll_injection();
+
+    // Check browser hijacking
+    check_browser_hijacking();
 
     // Check security center tampering
     check_security_tampering();
@@ -144,16 +314,32 @@ fn display_autorun_keys() {
     println!("[*] Checking Autorun Locations:");
     println!("================================\n");
 
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+
     // HKCU Run
     println!("[HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run]");
-    display_all_values(&RegKey::predef(HKEY_CURRENT_USER),
-                      "Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    display_all_values(&hkcu, "Software\\Microsoft\\Windows\\CurrentVersion\\Run");
     println!();
 
     // HKLM Run
     println!("[HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run]");
-    display_all_values(&RegKey::predef(HKEY_LOCAL_MACHINE),
-                      "Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    display_all_values(&hklm, "Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    println!();
+
+    // HKCU RunOnce
+    println!("[HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce]");
+    display_all_values(&hkcu, "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
+    println!();
+
+    // HKLM RunOnce
+    println!("[HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce]");
+    display_all_values(&hklm, "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
+    println!();
+
+    // SharedTaskScheduler
+    println!("[HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SharedTaskScheduler]");
+    display_all_values(&hklm, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SharedTaskScheduler");
     println!();
 }
 
@@ -263,6 +449,16 @@ fn check_security_tampering() {
                      "Hidden", 2);
     check_dword_value(&hkcu, "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
                      "ShowSuperHidden", 0);
+
+    println!("\nSystem Tool Restrictions:");
+    check_dword_value(&hkcu, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                     "DisableTaskMgr", 1);
+    check_dword_value(&hkcu, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                     "DisableRegistryTools", 1);
+    check_dword_value(&hklm, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                     "DisableTaskMgr", 1);
+    check_dword_value(&hklm, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                     "DisableRegistryTools", 1);
 
     println!();
 }
