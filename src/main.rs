@@ -3,6 +3,7 @@ use winreg::RegKey;
 use regex::Regex;
 use std::collections::HashSet;
 use lazy_static::lazy_static;
+use std::env;
 
 lazy_static! {
     static ref DICTIONARY: HashSet<&'static str> = {
@@ -280,8 +281,16 @@ fn check_browser_hijacking() {
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
+
     println!("Sality Malware Detector");
-    println!("======================\n");
+    println!("======================");
+    if verbose {
+        println!("Running in VERBOSE mode\n");
+    } else {
+        println!("Use --verbose or -v for detailed output\n");
+    }
 
     // Display autorun locations
     display_autorun_keys();
@@ -305,7 +314,7 @@ fn main() {
     check_security_tampering();
 
     // Check for SafeBoot modifications
-    check_safeboot_modifications();
+    check_safeboot_modifications(verbose);
 
     println!("\nScan complete.");
 }
@@ -483,29 +492,73 @@ fn check_dword_value(hive: &RegKey, path: &str, value_name: &str, expected: u32)
     }
 }
 
-fn check_safeboot_modifications() {
+fn check_safeboot_modifications(verbose: bool) {
     println!("[*] Checking SafeBoot Modifications:");
     println!("====================================\n");
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let safeboot_path = "SYSTEM\\CurrentControlSet\\Control\\SafeBoot";
 
-    match hklm.open_subkey("SYSTEM\\CurrentControlSet\\Control\\SafeBoot") {
+    match hklm.open_subkey(safeboot_path) {
         Ok(safeboot_key) => {
-            println!("[HKLM\\SYSTEM\\CurrentControlSet\\Control\\SafeBoot]");
+            if verbose {
+                // Verbose mode: Show all entries
+                println!("[HKLM\\SYSTEM\\CurrentControlSet\\Control\\SafeBoot]");
 
-            // Enumerate all subkeys
-            for subkey_name in safeboot_key.enum_keys().filter_map(|x| x.ok()) {
-                println!("  Subkey found: {}", subkey_name);
+                for subkey_name in safeboot_key.enum_keys().filter_map(|x| x.ok()) {
+                    println!("  Subkey found: {}", subkey_name);
 
-                // Recursively check for suspicious modifications
-                let path = format!("SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\{}", subkey_name);
-                if let Ok(subkey) = hklm.open_subkey(&path) {
-                    check_safeboot_recursive(&subkey, &path, 1);
+                    let path = format!("SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\{}", subkey_name);
+                    if let Ok(subkey) = hklm.open_subkey(&path) {
+                        check_safeboot_recursive(&subkey, &path, 1);
+                    }
+                }
+            } else {
+                // Concise mode: Just check integrity
+                let required_modes = ["Minimal", "Network"];
+                let mut missing_modes = Vec::new();
+                let mut mode_counts = Vec::new();
+
+                for mode in &required_modes {
+                    match safeboot_key.open_subkey(mode) {
+                        Ok(mode_key) => {
+                            let entry_count = mode_key.enum_keys()
+                                .filter_map(|x| x.ok())
+                                .count();
+                            mode_counts.push((*mode, entry_count));
+
+                            if entry_count == 0 {
+                                println!("  [SUSPICIOUS] {} mode exists but is EMPTY", mode);
+                            } else if entry_count < 10 {
+                                println!("  [WARNING] {} mode has only {} entries (suspiciously low)",
+                                       mode, entry_count);
+                            } else {
+                                println!("  [OK] {} mode: {} entries", mode, entry_count);
+                            }
+                        }
+                        Err(_) => {
+                            missing_modes.push(*mode);
+                            println!("  [CRITICAL] {} mode is MISSING!", mode);
+                        }
+                    }
+                }
+
+                // Overall assessment
+                if !missing_modes.is_empty() {
+                    println!("\n  [ALERT] SafeBoot is compromised - missing critical modes!");
+                    println!("  This prevents booting into Safe Mode.");
+                } else {
+                    let total_entries: usize = mode_counts.iter().map(|(_, c)| c).sum();
+                    if total_entries < 20 {
+                        println!("\n  [WARNING] SafeBoot has suspiciously few entries ({})", total_entries);
+                        println!("  Normal systems have 30-50+ entries per mode.");
+                    }
                 }
             }
         }
-        Err(e) => {
-            println!("  No SafeBoot key found or error: {}", e);
+        Err(_) => {
+            println!("  [CRITICAL] SafeBoot registry key is completely MISSING!");
+            println!("  Safe Mode boot is disabled!");
         }
     }
 

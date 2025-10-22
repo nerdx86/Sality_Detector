@@ -117,10 +117,17 @@ Sality disables these tools to prevent users from detecting and removing the inf
 
 ### 8. SafeBoot Modifications
 
-Enumerates and displays the complete SafeBoot registry structure:
+Validates the SafeBoot registry structure:
 - `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot`
 
 Sality variants may recursively delete all values and subkeys under SafeBoot to prevent Windows from booting into Safe Mode, making removal more difficult.
+
+**Default Mode**: Performs integrity check counting entries in Minimal and Network modes:
+- Reports if modes are missing (CRITICAL)
+- Warns if entry counts are suspiciously low (<10 entries or <20 total)
+- Shows [OK] status with entry counts for healthy systems
+
+**Verbose Mode**: Enumerates all SafeBoot drivers, services, and device classes for forensic analysis.
 
 ## Usage
 
@@ -134,6 +141,7 @@ The optimized executable will be in `target\release\sality_detector.exe` (approx
 
 ### Running the Scanner
 
+**Default Mode (Concise Output):**
 ```
 cargo run --release
 ```
@@ -144,7 +152,27 @@ Or run the compiled executable directly:
 target\release\sality_detector.exe
 ```
 
+**Verbose Mode (Detailed Output):**
+
+For detailed registry enumeration (shows all SafeBoot entries):
+
+```
+cargo run --release -- --verbose
+```
+
+Or with the compiled executable:
+
+```
+target\release\sality_detector.exe --verbose
+target\release\sality_detector.exe -v
+```
+
 **Note**: Administrator privileges may be required to read some HKLM registry keys.
+
+### Output Modes
+
+- **Default Mode**: Shows concise summaries and only flags suspicious findings. SafeBoot check shows entry counts and warnings.
+- **Verbose Mode**: Shows complete registry enumerations, including all SafeBoot drivers and services (useful for forensic analysis).
 
 ### Example Output
 
@@ -184,6 +212,12 @@ Security Center Settings:
 System Policy Settings:
 
 System Tool Restrictions:
+
+[*] Checking SafeBoot Modifications:
+====================================
+
+  [OK] Minimal mode: 81 entries
+  [OK] Network mode: 138 entries
 ```
 
 #### Infected System
@@ -231,6 +265,28 @@ System Policy Settings:
 System Tool Restrictions:
   [HIT] [Software\Microsoft\Windows\CurrentVersion\Policies\System]\DisableTaskMgr = 1
   [HIT] [Software\Microsoft\Windows\CurrentVersion\Policies\System]\DisableRegistryTools = 1
+
+[*] Checking SafeBoot Modifications:
+====================================
+
+  [CRITICAL] Minimal mode is MISSING!
+  [CRITICAL] Network mode is MISSING!
+
+  [ALERT] SafeBoot is compromised - missing critical modes!
+  This prevents booting into Safe Mode.
+```
+
+**Or if partially deleted:**
+
+```
+[*] Checking SafeBoot Modifications:
+====================================
+
+  [SUSPICIOUS] Minimal mode exists but is EMPTY
+  [WARNING] Network mode has only 5 entries (suspiciously low)
+
+  [WARNING] SafeBoot has suspiciously few entries (5)
+  Normal systems have 30-50+ entries per mode.
 ```
 
 ## Detection Methodology
