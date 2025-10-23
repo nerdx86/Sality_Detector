@@ -1,2 +1,8 @@
 /target
 /.claude/settings.local.json
+
+# Sensitive incident/internal files
+sonicwall.txt
+StuffToAdd.md
+*.log
+*.txt
